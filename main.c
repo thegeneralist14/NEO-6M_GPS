@@ -21,8 +21,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <string.h>
 #include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -43,119 +44,34 @@
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
+DMA_HandleTypeDef hdma_usart1_rx;
 
 /* USER CODE BEGIN PV */
-uint8_t rxBuffer[128] = {0};
-uint8_t rxIndex = 0;
-uint8_t rxData;
-float nmeaLong;
-float nmeaLat;
-float utcTime;
-char northsouth;
-char eastwest;
-char posStatus;
-float decimalLong;
-float decimalLat;
+uint8_t rx_data[750];
+char tx_data[750];
+char gps_payload[100];
+uint8_t flag = 0;
+static int msg_index;
+char *ptr;
+float time, lattitude, longtitude;
+int hour, min, sec;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+void get_location(void);
+void format_data(float time, float latt, float longt);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-float nmeaToDecimal(float coordinate) {
-    int degree = (int)(coordinate/100);
-    float minutes = coordinate - degree * 100;
-    float decimalDegree = minutes / 60;
-    float decimal = degree + decimalDegree;
-    return decimal;
-}
 
-void gpsParse(char *strParse){
-  if(!strncmp(strParse, "$GPGGA", 6)){
-    sscanf(strParse, "$GPGGA,%f,%f,%c,%f,%c",
-      &utcTime, &nmeaLat, &northsouth, &nmeaLong, &eastwest);
-    decimalLat = nmeaToDecimal(nmeaLat);
-    decimalLong = nmeaToDecimal(nmeaLong);
-  }
-  else if (!strncmp(strParse, "$GPGLL", 6)){
-    sscanf(strParse, "$GPGLL,%f,%c,%f,%c,%f",
-      &nmeaLat, &northsouth, &nmeaLong, &eastwest, &utcTime);
-    decimalLat = nmeaToDecimal(nmeaLat);
-    decimalLong = nmeaToDecimal(nmeaLong);
-  }
-  else if (!strncmp(strParse, "$GPRMC", 6)){
-    sscanf(strParse, "$GPRMC,%f,%c,%f,%c,%f,%c",
-      &utcTime, &posStatus, &nmeaLat, &northsouth, &nmeaLong, &eastwest);
-    decimalLat = nmeaToDecimal(nmeaLat);
-    decimalLong = nmeaToDecimal(nmeaLong);
-  }
-}
-
-int gpsValidate(char *nmea){
-    char check[3];
-    char calculatedString[3];
-    int index;
-    int calculatedCheck;
-
-    index=0;
-    calculatedCheck=0;
-
-    // Ensure that the string starts with a "$"
-    if(nmea[index] == '$')
-        index++;
-    else
-        return 0;
-
-    //No NULL reached, 75 char largest possible NMEA message, no '*' reached
-    while((nmea[index] != 0) && (nmea[index] != '*') && (index < 75)){
-        calculatedCheck ^= nmea[index];// calculate the checksum
-        index++;
-    }
-
-    if(index >= 75){
-        return 0;// the string is too long so return an error
-    }
-
-    if (nmea[index] == '*'){
-        check[0] = nmea[index+1];    //put hex chars in check string
-        check[1] = nmea[index+2];
-        check[2] = 0;
-    }
-    else
-        return 0;// no checksum separator found therefore invalid data
-
-    sprintf(calculatedString,"%02X",calculatedCheck);
-    return((calculatedString[0] == check[0])
-        && (calculatedString[1] == check[1])) ? 1 : 0 ;
-}
-
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-  if(huart->Instance==USART1)
-  {
-    // if the character received is other than 'enter' ascii13, save the data in buffer
-    if(rxData!='\n' && rxIndex < sizeof(rxBuffer))
-    {
-      rxBuffer[rxIndex++]=rxData;
-    }
-
-    else
-    {
-      if(gpsValidate((char*) rxBuffer)) gpsParse((char*) rxBuffer);
-      rxIndex=0;
-      memset(rxBuffer,0,sizeof(rxBuffer));
-    }
-
-    HAL_UART_Receive_IT(&huart1,&rxData,1); // Enabling interrupt receive again
-  }
-}
 /* USER CODE END 0 */
 
 /**
@@ -172,7 +88,7 @@ int main(void)
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-	HAL_Init();
+  HAL_Init();
 
   /* USER CODE BEGIN Init */
 
@@ -187,16 +103,18 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_USART2_UART_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  HAL_UART_Receive_IT(&huart1, &rxData, 1);
+  HAL_UART_Receive_DMA(&huart1, (uint8_t*) rx_data, 700);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  get_location();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -304,7 +222,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
+  huart2.Init.BaudRate = 9600;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -320,6 +238,22 @@ static void MX_USART2_UART_Init(void)
   /* USER CODE BEGIN USART2_Init 2 */
 
   /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA2_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA2_Channel7_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Channel7_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Channel7_IRQn);
 
 }
 
@@ -363,7 +297,51 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
+	flag = 1;
+}
 
+void get_location(void){
+
+	HAL_UART_Transmit(&huart2, (uint8_t*)tx_data, strlen(tx_data), HAL_MAX_DELAY);
+
+	if (flag == 1){
+		msg_index = 0;
+		strcpy(tx_data, (char*)rx_data);
+		ptr = strstr(tx_data, "GPRMC");
+
+		if (*ptr == "G"){
+			while(1){
+				gps_payload[msg_index] = *ptr;
+				msg_index++;
+				*ptr = *(ptr + msg_index);
+
+				if (*ptr == '\n'){
+					gps_payload[msg_index] = '\0';
+					break;
+				}
+			}
+
+			sscanf(gps_payload, "GPRMC,%f,A,%f,N,%f,", &time, &lattitude, &longtitude);
+//			format_data(time, lattitude, longtitude);
+			HAL_Delay(1);
+			flag = 0;
+		}
+	}
+}
+
+void format_data(float time, float latt, float longt){
+	char data[100];
+	hour = (int) time / 10000;
+	min  = (int)(time - (hour * 10000)) / 100;
+	sec  = (int)(time - ((hour * 10000) + (min * 100)));
+
+	sprintf(data, "\r\nTime = %d:%d:%d | Latt = %f | Longt = %f | ", hour + 3, min, sec, lattitude, longtitude);
+
+	HAL_UART_Transmit(&huart2, (uint8_t*)data, strlen(data), HAL_MAX_DELAY);
+	HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n\n", 3, HAL_MAX_DELAY);
+
+}
 /* USER CODE END 4 */
 
 /**
